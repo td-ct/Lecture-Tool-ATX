@@ -3203,9 +3203,16 @@ details.legal .legal-body{line-height:1.5;margin-top:6px}
 details.legal p,details.legal li{margin:4px 0;text-align:left}
 details.legal ul{margin:4px 0;padding-left:18px}
 details.legal a{color:#2ecc71}
+/* Heartbeat-Status: keine Verbindung -> alles grau, Banner-Hinweis, Eingaben gesperrt */
+#offlinebar{display:none;position:fixed;top:0;left:0;right:0;z-index:99;padding:10px 14px;
+  background:#2a2116;border-bottom:2px solid #f39c12;color:#f1c40f;font-size:.9rem;font-weight:600;text-align:center}
+body.offline #offlinebar{display:block}
+body.offline > *:not(#offlinebar){filter:grayscale(1);opacity:.45;pointer-events:none}
+body.offline > #offlinebar{filter:none;opacity:1;pointer-events:auto}
 </style>
 </head>
 <body>
+<div id="offlinebar"><span class="de">⚠️ Verbindungsproblem — Netz, WLAN oder Server prüfen. Diese Seite ist nicht aktuell, Eingaben sind bis dahin gesperrt.</span><span class="en">⚠️ Connection problem — check network, Wi-Fi or server. This page is not up to date; input is blocked until then.</span></div>
 <h1>🎓 Lecture Tool ATX</h1>
 <p style="font-size:.8rem;color:#8b98a5;margin:0 0 8px"><span class="de">ATX steht für „Attention Tracker“</span><span class="en">ATX stands for “Attention Tracker”</span></p>
 <div id="langsw">
@@ -3419,10 +3426,12 @@ function applyLecState(d){
 function hideMain(h){ applyStuViewUI(h); }
 let firedBeeps = {};   // gespielte Chirp-Marken je Entscheidungsminute
 let voteOpenShown = false; // Tastatur pro Abstimmungsrunde neu aufbauen
+let lastBeat = Date.now();   // letzter erfolgreicher Server-Kontakt (Heartbeat)
 async function pollState(){
   try{
     const d = await fetch(location.pathname + '?api=snapshot&s=' + SID + '&tok=' + encodeURIComponent(token)).then(r=>r.json());
     if(!d || !d.id){ return; }
+    lastBeat = Date.now(); // Verbindung steht
     serverOff = (d.now || Math.floor(Date.now()/1000)) - Math.floor(Date.now()/1000);
     curSlide = consensusSlide(d);   // Mehrheitsfolie für das Drehrad
     /* neue Entscheidungs-/Abstimmungsrunde erkennen: Tastatur + Chirps zurücksetzen */
@@ -3442,6 +3451,13 @@ async function pollState(){
 }
 pollState();
 setInterval(pollState, 4000);
+
+/* Heartbeat-Überwachung: der Server meldet sich alle 4 s. Bleibt er länger
+   als 12 s (3 verpasste Runden) stumm, graut die Seite aus und sperrt die
+   Eingaben, bis die Verbindung wieder steht. */
+setInterval(() => {
+  document.body.classList.toggle('offline', Date.now() - lastBeat > 12000);
+}, 2000);
 
 /* Countdown-Ticker für Neuentscheidung (Chirps) und Anzeige der Frist */
 setInterval(() => {
