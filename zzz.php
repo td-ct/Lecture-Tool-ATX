@@ -328,7 +328,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         else {                           $start_in = true; $warn_min = 0; } // 'start': Start IN, Selbstmeldung, keine Runden
         /* Pro-Einstellungen: Dozenten-/Studentenansicht + Feature-Schalter */
         $lecview = (string)($in['lecview'] ?? 'pie');
-        if (!in_array($lecview, ['pie', 'figures', 'chart'], true)) $lecview = 'pie';
+        if (!in_array($lecview, ['pie', 'figures', 'chart', 'qrp', 'qrpx'], true)) $lecview = 'pie';
         $stuview = (($in['stuview'] ?? 'round') === 'classic') ? 'classic' : 'round';
         $allow_msg   = !empty($in['allow_msg']);
         $allow_votes = !empty($in['allow_votes']);
@@ -1107,6 +1107,12 @@ details.legal p,details.legal li{margin:4px 0}
 #loginbox{border:1px solid #2a323c;border-radius:12px;background:#0c1014;padding:12px 14px;margin-bottom:18px}
 .prosub{margin:10px 0;padding:10px 12px;border:1px solid #2a323c;border-radius:10px;background:#10141a}
 .prosub summary{cursor:pointer;font-weight:600}
+/* Clean-Modus: nur QR-Code + Visualisierung (+ Messages) — alles andere weg */
+#btnClean{position:fixed;left:14px;bottom:14px;z-index:50;background:#101418;color:var(--fg);border:1px solid #2a323c;border-radius:10px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+#btnClean:hover{border-color:var(--green)}
+body.clean header,body.clean #setup,body.clean #history,body.clean #legal,body.clean #logoutrow,
+body.clean #archbar,body.clean .btn-row,body.clean #sessinfo,body.clean #bigtime,body.clean #archtime,
+body.clean #otherlive,body.clean .status,body.clean #joinurl{display:none!important}
 #figwrap{margin-top:8px}
 @keyframes loginshake{0%,100%{transform:translateX(0)}25%{transform:translateX(-7px)}75%{transform:translateX(7px)}}
 #loginbox.loginerr{border-color:var(--red)!important;box-shadow:0 0 0 2px rgba(231,76,60,.35);animation:loginshake .3s 2}
@@ -1177,7 +1183,7 @@ details.legal a{color:var(--green)}
       </details>
 
       <details class="prosub">
-        <summary>📊 <span class="de">Dozenten-Ansicht</span><span class="en">Lecturer view</span></summary>
+        <summary>📊 <span class="de">Visualisierungstyp</span><span class="en">Visualization type</span></summary>
         <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
           <input type="radio" name="lecview" value="pie" id="lv-pie" checked>
           <label for="lv-pie" style="cursor:pointer">
@@ -1197,6 +1203,20 @@ details.legal a{color:var(--green)}
           <label for="lv-chart" style="cursor:pointer">
             <span class="de">📈 Zeitverlaufs-Diagramm (bisherige Ansicht) mit transparent farbigen Flächen unter den Kurven</span>
             <span class="en">📈 Timeline chart (previous view) with translucent coloured areas under the curves</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="lecview" value="qrp" id="lv-qrp">
+          <label for="lv-qrp" style="cursor:pointer">
+            <span class="de">🥧⬛ Torte hinter dem QR-Code: Das Tortendiagramm mit IN/undef/OUT-Anteilen liegt als Hintergrund hinter den Pixeln des QR-Codes</span>
+            <span class="en">🥧⬛ Pie behind the QR code: the pie chart with IN/undefined/OUT shares sits as a backdrop behind the QR code pixels</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="lecview" value="qrpx" id="lv-qrpx">
+          <label for="lv-qrpx" style="cursor:pointer">
+            <span class="de">⬛🟢🟡🔴 Einfärbbare QR-Pixel: Die schwarzen Datenpixel des QR-Codes werden auf die Gesamtzahl der anwesenden Studenten skaliert und anteilig eingefärbt (IN grün, undef gelb, OUT rot)</span>
+            <span class="en">⬛🟢🟡🔴 Colourable QR pixels: the QR code’s black data pixels are scaled to the number of present students and coloured by share (IN green, undefined yellow, OUT red)</span>
           </label>
         </div>
       </details>
@@ -1381,6 +1401,7 @@ details.legal a{color:var(--green)}
   <div class="btn-row" id="logoutrow" style="justify-content:center">
     <button class="danger" onclick="logout()"><span class="de">Verlassen &amp; abmelden</span><span class="en">Leave &amp; logout</span></button>
   </div>
+  <button id="btnClean" onclick="toggleClean()" title="Nur QR-Code und Visualisierung zeigen">🧹 <span class="de">Clean</span><span class="en">Clean</span></button>
 
   <div class="card" id="legal">
     <details class="legal">
@@ -2115,7 +2136,7 @@ function openSession(id, meta){
   processed = 0; silent = true;
   const url = location.origin + location.pathname + '?s=' + id;
   document.getElementById('joinurl').textContent = url;
-  const qr = document.getElementById('qr'); qr.innerHTML = '';
+  const qr = document.getElementById('qr'); qr.innerHTML = ''; qrMat = null; /* QR-Modul-Cache für die QR-Visualisierung */
   try{
     new QRCode(qr, {text:url, width:220, height:220, correctLevel: QRCode.CorrectLevel.M});
   }catch(e){
@@ -2305,6 +2326,12 @@ async function logout(){
   localStorage.removeItem(LSPW);
   localStorage.removeItem(LSKEY);
   location.reload();
+}
+
+/* Clean-Modus: nur QR-Code + aktuelle Visualisierung (+ Messages) zeigen.
+   Gut für den Projektor: keine Formulare, Knöpfe oder Verwaltung drumherum. */
+function toggleClean(){
+  document.body.classList.toggle('clean');
 }
 
 async function restart(){
@@ -2722,10 +2749,116 @@ function renderSimple(lv){
     c.width = W*dpr; c.height = H*dpr;
     const ctx = c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
     drawPie(ctx, W, H, cnt);
+  } else if(lv === 'qrp' || lv === 'qrpx'){
+    fig.classList.add('hidden'); c.classList.remove('hidden');
+    const dpr = window.devicePixelRatio || 1, W = c.clientWidth || 600, H = c.clientHeight || 420;
+    c.width = W*dpr; c.height = H*dpr;
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+    drawQrViz(ctx, W, H, cnt, lv);
   } else {
     c.classList.add('hidden'); fig.classList.remove('hidden');
     drawFigures(fig, cnt);
   }
+}
+
+/* Modul-Matrix des QR-Codes (Join-QR in der Dozenten-Ansicht) einlesen.
+   qrcodejs zeichnet Canvas (oder <img> als Fallback): Modulgröße = kürzester
+   Lauf gleicher Farbe; daraus Raster der dunklen/hellen Module. Gecacht, da
+   der QR-Code pro Session statisch ist. */
+let qrMat = null;
+function qrMatrix(){
+  if(qrMat) return qrMat;
+  let cv = document.querySelector('#qr canvas');
+  if(!cv){
+    const im = document.querySelector('#qr img');
+    if(!im || !(im.naturalWidth || im.width)) return null;
+    cv = document.createElement('canvas');
+    cv.width = im.naturalWidth || im.width; cv.height = im.naturalHeight || im.height;
+    cv.getContext('2d').drawImage(im, 0, 0);
+  }
+  try{
+    const w = cv.width, h = cv.height;
+    if(!w || !h) return null;
+    const img = cv.getContext('2d').getImageData(0, 0, w, h).data;
+    const dark = (x, y) => img[(y*w+x)*4] < 128;
+    /* Modulgröße = kürzester Lauf gleicher Farbe über alle Zeilen */
+    let size = 0;
+    for(let y = 0; y < h; y++){
+      let run = 1;
+      for(let x = 1; x < w; x++){
+        if(dark(x, y) === dark(x-1, y)) run++;
+        else { if(size === 0 || run < size) size = run; run = 1; }
+      }
+    }
+    if(!size) return null;
+    /* Bounding-Box der dunklen Fläche -> quadratisches Raster */
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for(let y = 0; y < h; y++) for(let x = 0; x < w; x++)
+      if(dark(x, y)){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+    if(maxX < 0) return null;
+    const n = Math.round((maxX-minX+1)/size);
+    if(n < 10 || n !== Math.round((maxY-minY+1)/size)) return null;
+    const cells = [];
+    for(let r = 0; r < n; r++){
+      const row = [];
+      for(let cc = 0; cc < n; cc++)
+        row.push(dark(minX + cc*size + (size>>1), minY + r*size + (size>>1)) ? 1 : 0);
+      cells.push(row);
+    }
+    qrMat = {n, cells};
+    return qrMat;
+  }catch(e){ return null; }
+}
+
+/* QR-Visualisierungen: 'qrp' = Torte als Hintergrund hinter den QR-Pixeln,
+   'qrpx' = dunkle QR-Module auf die anwesenden Studenten skaliert und
+   anteilig eingefärbt (Cluster IN grün -> undef gelb -> OUT rot). */
+function drawQrViz(ctx, W, H, cnt, lv){
+  const m = qrMatrix();
+  if(!m){ drawPie(ctx, W, H, cnt); return; } /* QR noch nicht da: Torte als Fallback */
+  const quiet = 4;                                   /* heller Rand (4 Module, Norm) */
+  const side = Math.max(80, Math.min(W - 30, H - 76));
+  const mod = Math.max(1, Math.floor(side/(m.n + quiet*2)));
+  const qrSide = mod*(m.n + quiet*2);
+  const ox = Math.floor((W - qrSide)/2), oy = Math.floor((H - 46 - qrSide)/2);
+  const joined = cnt.in + cnt.undef + cnt.out;
+  if(lv === 'qrp'){
+    drawPie(ctx, W, H, cnt);                         /* Hintergrund: die Torte */
+    ctx.fillStyle = '#101418';                       /* QR-Pixel darauf, Helle bleiben Tortenfarbe */
+    for(let r = 0; r < m.n; r++) for(let cc = 0; cc < m.n; cc++)
+      if(m.cells[r][cc]) ctx.fillRect(ox+(cc+quiet)*mod, oy+(r+quiet)*mod, mod, mod);
+  } else {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(ox, oy, qrSide, qrSide);
+    /* Datenpixel der Reihe nach: Gesamtzahl der Studenten verteilt sich auf alle dunklen Module */
+    const cells = [];
+    for(let r = 0; r < m.n; r++) for(let cc = 0; cc < m.n; cc++)
+      if(m.cells[r][cc]) cells.push([r, cc]);
+    if(!joined){
+      ctx.fillStyle = '#101418';                     /* niemand da: normaler QR */
+      for(const [r, cc] of cells) ctx.fillRect(ox+(cc+quiet)*mod, oy+(r+quiet)*mod, mod, mod);
+    } else {
+      const M = cells.length;
+      const nIn = Math.round(M*cnt.in/joined), nUn = Math.round(M*cnt.undef/joined);
+      cells.forEach(([r, cc], i) => {
+        ctx.fillStyle = i < nIn ? '#2ecc71' : (i < nIn + nUn ? '#f1c40f' : '#e74c3c');
+        ctx.fillRect(ox+(cc+quiet)*mod, oy+(r+quiet)*mod, mod, mod);
+      });
+    }
+  }
+  /* Legende wie bei der Torte + Modus-Beschriftung */
+  ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'left';
+  let x = 14;
+  for(const [txt, col] of [['IN · '+cnt.in,'#2ecc71'], ['undef · '+cnt.undef,'#f1c40f'], ['OUT · '+cnt.out,'#e74c3c']]){
+    ctx.fillStyle = col; ctx.fillRect(x, H-32, 14, 14);
+    ctx.fillStyle = '#e8edf2'; ctx.fillText(txt, x+19, H-20);
+    x += 19 + ctx.measureText(txt).width + 20;
+  }
+  ctx.fillStyle = '#8b98a5'; ctx.font = '12px system-ui';
+  ctx.fillText(lv === 'qrp'
+    ? (LANG === 'de' ? 'Torte hinter dem QR-Code' : 'Pie behind the QR code')
+    : (LANG === 'de' ? 'QR-Pixel = anwesende Studenten (IN → undef → OUT)' : 'QR pixels = present students (IN → undefined → OUT)'),
+    x, H-20);
 }
 
 function render(){
@@ -2734,9 +2867,9 @@ function render(){
      Alt-Sessions ohne Feld: Messages bleiben wie bisher sichtbar */
   const chatEl = document.getElementById('chat');
   if(chatEl) chatEl.classList.toggle('hidden', !session || session.allow_msg === false);
-  /* Pro-Visualisierung: Tortendiagramm oder Strichmännchen (live); Archiv bleibt Zeitverlauf */
+  /* Pro-Visualisierung: Torte, Strichmännchen oder QR-Visualisierung (live); Archiv bleibt Zeitverlauf */
   const lv = session.lecview || 'chart';
-  if(!archive && (lv === 'pie' || lv === 'figures')){ renderSimple(lv); return; }
+  if(!archive && (lv === 'pie' || lv === 'figures' || lv === 'qrp' || lv === 'qrpx')){ renderSimple(lv); return; }
   const figEl = document.getElementById('figwrap'); if(figEl) figEl.classList.add('hidden');
   const cvEl = document.getElementById('chart'); if(cvEl) cvEl.classList.remove('hidden');
   const c = document.getElementById('chart');
