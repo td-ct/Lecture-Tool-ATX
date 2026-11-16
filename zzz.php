@@ -2869,10 +2869,12 @@ function drawQrViz(ctx, W, H, cnt, lv){
 
 function render(){
   if(!session) return;
-  /* Nachrichten-Fenster (inkl. Überschrift) nur zeigen, wenn Nachrichten aktiviert sind;
-     Alt-Sessions ohne Feld: Messages bleiben wie bisher sichtbar */
+  /* Nachrichten-Fenster (inkl. Überschrift) in der LIVE-Ansicht nur zeigen,
+     wenn Nachrichten aktiviert sind — Alt-Sessions ohne Feld: wie bisher sichtbar.
+     Im ARCHIV bleibt der komplette Chatverlauf (inkl. Log-Meldungen, Abstimmungs-
+     und Bewertungsergebnisse) immer sichtbar, wie es vor dem Pro-Tab war. */
   const chatEl = document.getElementById('chat');
-  if(chatEl) chatEl.classList.toggle('hidden', !session || session.allow_msg === false);
+  if(chatEl) chatEl.classList.toggle('hidden', !session || (!archive && session.allow_msg === false));
   /* Pro-Visualisierung: Torte, Strichmännchen oder QR-Visualisierung (live); Archiv bleibt Zeitverlauf */
   const lv = session.lecview || 'chart';
   if(!archive && (lv === 'pie' || lv === 'figures' || lv === 'qrp' || lv === 'qrpx')){ renderSimple(lv); return; }
