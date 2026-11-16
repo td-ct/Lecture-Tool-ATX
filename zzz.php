@@ -313,8 +313,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         if ($sched_start < 0 || $sched_end < 0 || ($sched_start && $sched_end && $sched_end <= $sched_start)) {
             http_response_code(400); echo json_encode(['ok'=>false,'error'=>emsg('Ungültige geplante Zeiten','Invalid scheduled times')]); exit;
         }
+        /* Ohne Planung (Pro-Checkbox „Planen“ aus): Vorlesung startet sofort,
+           der Dozent braucht keinen „Timer starten“ mehr. */
+        $autostart = !empty($in['autostart']) && $sched_start === 0;
         $s = new_sid();
-        save_sess($s, [
+        $d0 = [
             'id' => $s,
             'title' => $title,
             'lecturer' => $lect,
@@ -322,7 +325,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             'institute' => $inst,
             'sched_start' => $sched_start,
             'sched_end' => $sched_end,
-            'started_at' => null, // Vorlesung startet erst mit 'start'
+            'started_at' => null, // Vorlesung startet erst mit 'start' (außer Autostart, siehe unten)
             'planned_min' => $min,
             'start_in' => $start_in,
             'ask_mode' => $ask_mode,
@@ -342,7 +345,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             'owner' => owner_hash($pw, $s),
             'students' => [],
             'events' => [],
-        ]);
+        ];
+        if ($autostart) {
+            $d0['started_at'] = time();
+            $d0['expected_end'] = time() + $min * 60;
+            /* wie beim manuellen Start: Modus 'auto' fragt direkt zu Beginn ab */
+            if (ask_mode_of($d0) === 'auto')
+                open_decide($d0, 'auto', time());
+        }
+        save_sess($s, $d0);
         if (!is_file(spath($s))) {
             http_response_code(500);
             echo json_encode(['ok'=>false,'error'=>emsg('zzz-data-Ordner nicht beschreibbar (www-data, chmod 770)','zzz-data folder not writable (www-data, chmod 770)')]);
@@ -1059,13 +1070,37 @@ details.legal a{color:var(--green)}
     <input type="text" id="lect" data-ph="lect">
     <label for="inst" style="display:block;margin-top:14px"><span class="de">Institut (optional)</span><span class="en">Institute (optional)</span></label>
     <input type="text" id="inst" data-ph="inst">
-    <label for="dur" style="display:block;margin-top:18px"><span class="de">Geplante Vorlesungsdauer</span><span class="en">Planned lecture duration</span></label>
-    <div class="slider-row">
-      <input type="range" id="dur" min="5" max="720" step="5" value="90" oninput="document.getElementById('durval').textContent=this.value+' min'">
-      <span class="slider-val" id="durval">90 min</span>
-    </div>
     <details id="probox" style="margin-top:14px;border:1px solid #2a323c;border-radius:12px;background:#0c1014;padding:12px 14px">
       <summary style="font-weight:700;cursor:pointer">⚙️ <span class="de">Pro-Einstellungen</span><span class="en">Pro settings</span></summary>
+
+      <details class="prosub">
+        <summary>🗓 <span class="de">Planen</span><span class="en">Schedule</span></summary>
+        <div class="check-row" style="margin-top:8px">
+          <input type="checkbox" id="planon">
+          <label for="planon" style="cursor:pointer">
+            <span class="de">Zeit, Datum und Dauer planen — Start dann per „Timer starten“ oder zum geplanten Beginn</span>
+            <span class="en">Plan time, date and duration — start then via “Start timer” or at the scheduled start</span>
+          </label>
+        </div>
+        <div id="planwrap" class="hidden">
+          <label for="dur" style="display:block;margin-top:10px"><span class="de">Geplante Vorlesungsdauer</span><span class="en">Planned lecture duration</span></label>
+          <div class="slider-row">
+            <input type="range" id="dur" min="5" max="720" step="5" value="90" oninput="document.getElementById('durval').textContent=this.value+' min'">
+            <span class="slider-val" id="durval">90 min</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:180px">
+              <label for="schedStart" style="display:block"><span class="de">Geplanter Beginn (optional)</span><span class="en">Planned start (optional)</span></label>
+              <input type="datetime-local" id="schedStart">
+            </div>
+            <div style="flex:1;min-width:180px">
+              <label for="schedEnd" style="display:block"><span class="de">Geplantes Ende (optional)</span><span class="en">Planned end (optional)</span></label>
+              <input type="datetime-local" id="schedEnd">
+            </div>
+          </div>
+        </div>
+        <div class="hint"><span class="de">Standardmäßig aus — die Vorlesung startet dann sofort beim Erstellen, ganz ohne „Timer starten“, Beginn oder Dauer. Im Hintergrund läuft trotzdem die gewohnte Aufzeichnung.</span><span class="en">Off by default — the lecture then starts immediately on creation, without “Start timer”, start time or duration. The usual recording still runs in the background.</span></div>
+      </details>
 
       <details class="prosub">
         <summary>📊 <span class="de">Dozenten-Ansicht</span><span class="en">Lecturer view</span></summary>
@@ -1187,16 +1222,6 @@ details.legal a{color:var(--green)}
         <div class="hint"><span class="de">Standardmäßig aus — die Studenten sehen nach dem Ende dann keine Bewertung.</span><span class="en">Off by default — students then see no evaluation after the end.</span></div>
       </details>
     </details>
-    <div style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
-      <div style="flex:1;min-width:180px">
-        <label for="schedStart" style="display:block"><span class="de">Geplanter Beginn (optional)</span><span class="en">Planned start (optional)</span></label>
-        <input type="datetime-local" id="schedStart">
-      </div>
-      <div style="flex:1;min-width:180px">
-        <label for="schedEnd" style="display:block"><span class="de">Geplantes Ende (optional)</span><span class="en">Planned end (optional)</span></label>
-        <input type="datetime-local" id="schedEnd">
-      </div>
-    </div>
     <div class="btn-row">
       <button class="primary" id="btnstart" onclick="startSession()"><span class="de">Erstellen</span><span class="en">Create</span></button>
     </div>
@@ -1558,9 +1583,11 @@ document.getElementById('mail').addEventListener('input', loginChanged);
 
 /* Pro-Bereich: Optionspakete/Bewertungsfragen erst zeigen, wenn aktiviert */
 function proToggles(){
+  document.getElementById('planwrap').classList.toggle('hidden', !document.getElementById('planon').checked);
   document.getElementById('vpackwrap').classList.toggle('hidden', !document.getElementById('voteson').checked);
   document.getElementById('evalqwrap').classList.toggle('hidden', !document.getElementById('evalon').checked);
 }
+document.getElementById('planon').addEventListener('change', proToggles);
 document.getElementById('voteson').addEventListener('change', proToggles);
 document.getElementById('evalon').addEventListener('change', proToggles);
 proToggles();
@@ -1606,12 +1633,14 @@ async function startSession(){
   const email = document.getElementById('mail').value.trim();
   if(!email) return alert(t('mailShort'));
   if(document.getElementById('pwsave').checked) localStorage.setItem(LSPW, pw);
+  const planon = document.getElementById('planon').checked;
   const planned = +document.getElementById('dur').value;
   const title = document.getElementById('title').value.trim();
   const lecturer = document.getElementById('lect').value.trim();
   const institute = document.getElementById('inst').value.trim();
-  const sched_start = toTs(document.getElementById('schedStart').value);
-  const sched_end   = toTs(document.getElementById('schedEnd').value);
+  const sched_start = planon ? toTs(document.getElementById('schedStart').value) : 0;
+  const sched_end   = planon ? toTs(document.getElementById('schedEnd').value) : 0;
+  const autostart   = !planon; /* ohne Planung: sofort live, kein „Timer starten“ */
   const warn_min    = +document.getElementById('warnmin').value;
   const ask_mode    = (document.querySelector('input[name=askmode]:checked') || {}).value || 'start';
   const lecview     = (document.querySelector('input[name=lecview]:checked') || {}).value || 'pie';
@@ -1624,7 +1653,7 @@ async function startSession(){
   const evalq       = document.getElementById('evalq').value;
   let r;
   try{
-    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, start_in, warn_min, ask_mode, lecview, stuview, allow_msg, allow_votes, allow_eval, vote_packs, evalq, pw});
+    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, autostart, start_in, warn_min, ask_mode, lecview, stuview, allow_msg, allow_votes, allow_eval, vote_packs, evalq, pw});
   }catch(e){
     return alert(t('srvErr'));
   }
@@ -1635,6 +1664,7 @@ async function startSession(){
   showShareDlg(r.id, {
     title, lecturer, institute, email,
     planned_min: planned,
+    autostart,
     sched_start: schedTxt('schedStart'),
     sched_end:   schedTxt('schedEnd'),
     warn_min, ask_mode
@@ -1655,7 +1685,9 @@ function showShareDlg(id, meta){
   if(meta.title)       rows.push('📌 <b>' + escapeHtml(meta.title) + '</b>');
   if(meta.lecturer)    rows.push('👤 ' + escapeHtml(meta.lecturer));
   if(meta.institute)   rows.push('🏛 ' + escapeHtml(meta.institute));
-  rows.push('⏱ ' + t('planned') + fmt(meta.planned_min*60));
+  rows.push(meta.autostart
+    ? '🚀 <span class="de">Startet sofort — kein „Timer starten“ nötig</span><span class="en">Starts immediately — no “Start timer” needed</span>'
+    : '⏱ ' + t('planned') + fmt(meta.planned_min*60));
   if(meta.sched_start) rows.push('🟢 ' + t('beginn') + fmtDT(meta.sched_start));
   if(meta.sched_end)   rows.push('🏁 ' + t('ende') + fmtDT(meta.sched_end));
   rows.push('🆔 ' + t('sessId') + ' <code>' + id + '</code>');
@@ -1934,6 +1966,8 @@ async function reuseSettings(){
   const sEl = document.getElementById('schedStart'), eEl = document.getElementById('schedEnd');
   if(d.sched_start) setDT('schedStart', d.sched_start); else sEl.value = '';
   if(d.sched_end)   setDT('schedEnd',   d.sched_end);   else eEl.value = '';
+  /* Planen: nur aktivieren, wenn tatsächlich geplant wurde (Zeit oder Termin) */
+  document.getElementById('planon').checked = !!(d.sched_start || d.sched_end);
   document.getElementById('warnmin').value = String(d.warn_min || 45); /* alte 0-Werte: Standard 45 */
   /* Status-Abfrage-Modus übernehmen; Alt-Sessions ohne Feld: wie bisher ableiten */
   const am = d.ask_mode || (d.warn_min > 0 ? 'auto' : 'start');
@@ -2072,6 +2106,9 @@ function paintRunControls(){
   const bX = document.getElementById('btnLecStop');
   bS.className = 'bigbtn inglow' + (st === 'waiting' ? '' : ' dimmed');
   bX.disabled = (st !== 'running'); /* Beenden nur möglich, während sie läuft */
+  /* „Timer starten“ nur zeigen, solange noch nicht gestartet wurde
+     (Autostart-Sessions starten sofort — der Knopf bleibt dann komplett weg) */
+  bS.classList.toggle('hidden', st !== 'waiting');
   /* Pro-Gating: Abstimmen-Knopf nur anzeigen, wenn Umfragen aktiviert sind */
   const bV = document.getElementById('btnVote');
   if(bV) bV.classList.toggle('hidden', !(!archive && session && session.allow_votes));
@@ -2599,6 +2636,9 @@ function renderSimple(lv){
 
 function render(){
   if(!session) return;
+  /* Nachrichten-Fenster nur zeigen, wenn Nachrichten aktiviert sind */
+  const chatEl = document.getElementById('chat');
+  if(chatEl) chatEl.classList.toggle('hidden', !(session && session.allow_msg));
   /* Pro-Visualisierung: Tortendiagramm oder Strichmännchen (live); Archiv bleibt Zeitverlauf */
   const lv = session.lecview || 'chart';
   if(!archive && (lv === 'pie' || lv === 'figures')){ renderSimple(lv); return; }
