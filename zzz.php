@@ -298,11 +298,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $sched_end   = (int)($in['sched_end'] ?? 0);
         $start_in    = !empty($in['start_in']);               // Studenten starten direkt IN
         $warn_min    = max(0, min(240, (int)($in['warn_min'] ?? 0))); // 0 = keine Auto-Neuentscheidung
-        $ask_mode    = (string)($in['ask_mode'] ?? 'ondemand');       // Status-Abfrage-Modus
-        if (!in_array($ask_mode, ['start', 'auto', 'ondemand'], true)) $ask_mode = 'ondemand';
+        $ask_mode    = (string)($in['ask_mode'] ?? 'start');         // Standard: Start IN, Selbstmeldung
+        if (!in_array($ask_mode, ['start', 'auto', 'ondemand'], true)) $ask_mode = 'start';
         if ($ask_mode === 'ondemand') { $start_in = false; $warn_min = 0; } // alle undef bis zur ersten „Prüfen“-Abfrage
         elseif ($ask_mode === 'auto') {   $start_in = false; }              // undef bis zur Abfrage direkt zum Start
         else {                           $start_in = true; $warn_min = 0; } // 'start': Start IN, Selbstmeldung, keine Runden
+        /* Pro-Einstellungen: Dozenten-/Studentenansicht + Feature-Schalter */
+        $lecview = (string)($in['lecview'] ?? 'pie');
+        if (!in_array($lecview, ['pie', 'figures', 'chart'], true)) $lecview = 'pie';
+        $stuview = (($in['stuview'] ?? 'round') === 'classic') ? 'classic' : 'round';
+        $allow_msg   = !empty($in['allow_msg']);
+        $allow_votes = !empty($in['allow_votes']);
+        $allow_eval  = !empty($in['allow_eval']);
         if ($sched_start < 0 || $sched_end < 0 || ($sched_start && $sched_end && $sched_end <= $sched_start)) {
             http_response_code(400); echo json_encode(['ok'=>false,'error'=>emsg('Ungültige geplante Zeiten','Invalid scheduled times')]); exit;
         }
@@ -320,13 +327,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             'start_in' => $start_in,
             'ask_mode' => $ask_mode,
             'warn_min' => $warn_min,
+            'lecview' => $lecview,
+            'stuview' => $stuview,
+            'allow_msg' => $allow_msg,
+            'allow_votes' => $allow_votes,
+            'allow_eval' => $allow_eval,
             'decide_seq' => 0,
             'decide_until' => 0,
             'vote_no' => 0,
             'vote_until' => 0,
             'vote_pack' => 0,
-            'vote_packs' => parse_vote_packs((string)($in['vote_packs'] ?? '')),
-            'eval_qs' => parse_eval_qs((string)($in['evalq'] ?? '')),
+            'vote_packs' => $allow_votes ? parse_vote_packs((string)($in['vote_packs'] ?? '')) : [],
+            'eval_qs' => $allow_eval ? parse_eval_qs((string)($in['evalq'] ?? '')) : [],
             'owner' => owner_hash($pw, $s),
             'students' => [],
             'events' => [],
@@ -390,6 +402,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
            nur nach dem Stopp des Dozenten ist die Aufzeichnung geschlossen */
         reply(sess_mutate($s, function (array &$d) use ($token, $state, $msg, $emoji, $slide) {
             if (!empty($d['stopped_at'])) return ['code' => 410, 'body' => ['ok'=>false,'error'=>'finished']];
+            if (empty($d['allow_msg'])) $msg = ''; // Nachrichten für diese Veranstaltung deaktiviert
             /* On-demand-Modus: IN/OUT nur während einer „Prüfen“-Abfrage möglich */
             if (ask_mode_of($d) === 'ondemand'
                 && (empty($d['decide_until']) || time() > (int)$d['decide_until']))
@@ -450,12 +463,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     if ($action === 'vote') {
         /* Dozent eröffnet eine 60-Sekunden-Abstimmung: Ziffern 1–9 (0 = Enthaltung)
            oder ein zuvor hinterlegtes Optionspaket (Titel + Optionen) */
-        $s = (string)($in['s'] ?? '');
-        if (!sid_ok($s)) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'bad session']); exit; }
+        $s = (string)($in['s'] ?? '');        if (!sid_ok($s)) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'bad session']); exit; }
         $pw = (string)($in['pw'] ?? '');
         $pack = max(0, (int)($in['pack'] ?? 0));
         reply(sess_mutate($s, function (array &$d) use ($s, $pw, $pack) {
             if (!owner_ok($d, $s, $pw)) return ['code' => 403, 'body' => ['ok'=>false,'error'=>emsg('falsches Passwort','wrong password')]];
+            if (empty($d['allow_votes'])) return ['code' => 403, 'body' => ['ok'=>false,'error'=>emsg('Umfragen sind für diese Veranstaltung deaktiviert','Polls are disabled for this event')]];
             if (!empty($d['stopped_at'])) return ['code' => 409, 'body' => ['ok'=>false,'error'=>emsg('Vorlesung ist bereits beendet','Lecture is already finished')]];
             if ($pack > 0 && !isset(($d['vote_packs'] ?? [])[$pack - 1]))
                 return ['code' => 400, 'body' => ['ok'=>false,'error'=>emsg('unbekanntes Optionspaket','unknown vote package')]];
@@ -507,6 +520,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $ans = ucut((string)($in['a'] ?? ''), 200);
         $cmt = ucut((string)($in['c'] ?? ''), 300);
         reply(sess_mutate($s, function (array &$d) use ($token, $qi, $ans, $cmt) {
+            if (empty($d['allow_eval'])) return ['code' => 403, 'body' => ['ok'=>false,'error'=>emsg('Die Abschlussbewertung ist für diese Veranstaltung deaktiviert','The final evaluation is disabled for this event')]];
             if (empty($d['stopped_at']))
                 return ['code' => 409, 'body' => ['ok'=>false,'error'=>emsg('Bewertung erst nach Ende der Vorlesung','evaluation only after the lecture ended')]];
             /* Bewertungsfrist: bis zu 24 Stunden nach Ende der Vorlesung */
@@ -621,6 +635,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 'lecturer' => (string)($d['lecturer'] ?? ''),
                 'email' => (string)($d['email'] ?? ''),
                 'institute' => (string)($d['institute'] ?? ''),
+                'lecview' => (string)($d['lecview'] ?? 'chart'),
+                'stuview' => (string)($d['stuview'] ?? 'classic'),
+                'ask_mode' => ask_mode_of($d),
+                'allow_msg' => !empty($d['allow_msg']),
+                'allow_votes' => !empty($d['allow_votes']),
+                'allow_eval' => !empty($d['allow_eval']),
                 'planned_min' => (int)($d['planned_min'] ?? 0),
                 'started_at' => $d['started_at'] ?? null,
                 'stopped_at' => $d['stopped_at'] ?? null,
@@ -1000,6 +1020,9 @@ details.legal p,details.legal li{margin:4px 0}
 .hrow .btns{flex:none}
 .cathead{margin:16px 0 6px;font-weight:700;font-size:.95rem;color:var(--fg)}
 #loginbox{border:1px solid #2a323c;border-radius:12px;background:#0c1014;padding:12px 14px;margin-bottom:18px}
+.prosub{margin:10px 0;padding:10px 12px;border:1px solid #2a323c;border-radius:10px;background:#10141a}
+.prosub summary{cursor:pointer;font-weight:600}
+#figwrap{margin-top:8px}
 @keyframes loginshake{0%,100%{transform:translateX(0)}25%{transform:translateX(-7px)}75%{transform:translateX(7px)}}
 #loginbox.loginerr{border-color:var(--red)!important;box-shadow:0 0 0 2px rgba(231,76,60,.35);animation:loginshake .3s 2}
 #loginbox h3{margin:0 0 10px}
@@ -1041,16 +1064,56 @@ details.legal a{color:var(--green)}
       <input type="range" id="dur" min="5" max="720" step="5" value="90" oninput="document.getElementById('durval').textContent=this.value+' min'">
       <span class="slider-val" id="durval">90 min</span>
     </div>
-    <label for="vpacks" style="display:block;margin-top:12px"><span class="de">🗳 Abstimmungspakete (optional)</span><span class="en">🗳 Vote packages (optional)</span></label>
-    <textarea id="vpacks" rows="4" style="width:100%;margin-top:8px;background:#101418;color:var(--fg);border:1px solid #2a323c;border-radius:10px;padding:10px;font:inherit;resize:vertical"></textarea>
-    <div class="hint"><span class="de">Format: 1. Zeile = Überschrift, darunter je Zeile eine Option. Leere Zeile = nächstes Paket. Die Pakete erscheinen später im Dropdown vor dem Abstimmen-Knopf.</span><span class="en">Format: line 1 = heading, then one option per line. Empty line = next package. Packages appear later in the dropdown next to the vote button.</span></div>
-    <label for="evalq" style="display:block;margin-top:12px"><span class="de">📝 Bewertung (optional)</span><span class="en">📝 Evaluation (optional)</span></label>
-    <textarea id="evalq" rows="4" style="width:100%;margin-top:8px;background:#101418;color:var(--fg);border:1px solid #2a323c;border-radius:10px;padding:10px;font:inherit;resize:vertical"></textarea>
-    <div class="hint"><span class="de">Format: Frage in eine Zeile, darunter die Antwortmöglichkeiten mit | getrennt. Mit |c am Ende gibt es zusätzlich ein Textfeld. Nur „|c“ ohne Optionen = reine Kommentarfrage (z. B. „Was schlägst du sonst noch vor?“). Die Studenten sehen die Fragen erst nach dem Stopp, eine nach der anderen.</span><span class="en">Format: question on one line, answer options below separated by |. Ending with |c adds a free-text field. Just „|c“ without options = comment-only question. Students only see the questions after the lecture stops, one at a time.</span></div>
-    <div style="margin-top:14px;padding:12px 14px;border:1px solid #2a323c;border-radius:12px;background:#0c1014">
-      <div style="font-weight:700;margin-bottom:4px">🧭 <span class="de">Status-Abfrage der Studenten</span><span class="en">Student status polling</span></div>
+    <details id="probox" style="margin-top:14px;border:1px solid #2a323c;border-radius:12px;background:#0c1014;padding:12px 14px">
+      <summary style="font-weight:700;cursor:pointer">⚙️ <span class="de">Pro-Einstellungen</span><span class="en">Pro settings</span></summary>
+
+      <details class="prosub">
+        <summary>📊 <span class="de">Dozenten-Ansicht</span><span class="en">Lecturer view</span></summary>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="lecview" value="pie" id="lv-pie" checked>
+          <label for="lv-pie" style="cursor:pointer">
+            <span class="de">🥧 Einfaches Tortendiagramm mit roten, gelben und grünen Anteilen — die Anzahl je Teil steht als Beschriftung dabei (Standard)</span>
+            <span class="en">🥧 Simple pie chart with red, yellow and green shares — each labelled with its count (default)</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="lecview" value="figures" id="lv-fig">
+          <label for="lv-fig" style="cursor:pointer">
+            <span class="de">🧍 Strichmännchen-Gruppe: grüne sind dabei, unentschlossene sind gelb — wer auf OUT wechselt, verlässt als rotes Strichmännchen die Menge</span>
+            <span class="en">🧍 Stick-figure group: green ones are in, undecided are yellow — switching to OUT makes a red figure leave the crowd</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="lecview" value="chart" id="lv-chart">
+          <label for="lv-chart" style="cursor:pointer">
+            <span class="de">📈 Zeitverlaufs-Diagramm (bisherige Ansicht) mit transparent farbigen Flächen unter den Kurven</span>
+            <span class="en">📈 Timeline chart (previous view) with translucent coloured areas under the curves</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="prosub">
+        <summary>📱 <span class="de">Studenten-Ansicht</span><span class="en">Student view</span></summary>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="stuview" value="round" id="sv-round" checked>
+          <label for="sv-round" style="cursor:pointer">
+            <span class="de">⭕ Ein runder Knopf mit den Zuständen IN und OUT — ein Tipp genügt (Standard)</span>
+            <span class="en">⭕ One round button with the IN and OUT states — a single tap (default)</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+          <input type="radio" name="stuview" value="classic" id="sv-classic">
+          <label for="sv-classic" style="cursor:pointer">
+            <span class="de">✅😴 Bisherige Ansicht: zwei Knöpfe plus Auswahl von Emoji, Folie und optionaler Nachricht</span>
+            <span class="en">✅😴 Previous view: two buttons plus emoji, slide and optional message selection</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="prosub">
+        <summary>🧭 <span class="de">Status-Abfrage der Studenten</span><span class="en">Student status polling</span></summary>
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
-        <input type="radio" name="askmode" value="start" id="am-start">
+        <input type="radio" name="askmode" value="start" id="am-start" checked>
         <label for="am-start" style="cursor:pointer">
           <span class="de">Studenten starten im Zustand „IN“ — Änderungen melden sie jederzeit selbst</span>
           <span class="en">Students start in the “IN” state — they report changes themselves anytime</span>
@@ -1069,14 +1132,61 @@ details.legal a{color:var(--green)}
         <span class="de">Minuten</span><span class="en">minutes</span>
       </div>
       <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
-        <input type="radio" name="askmode" value="ondemand" id="am-ondemand" checked>
+        <input type="radio" name="askmode" value="ondemand" id="am-ondemand">
         <label for="am-ondemand" style="cursor:pointer">
           <span class="de">On demand: Alle Studenten bleiben „undef“, bis du in der Vorlesung über „Prüfen“ gezielt abfragst — beliebig oft wiederholbar</span>
           <span class="en">On demand: all students stay “undefined” until you ask via “Check” during the lecture — repeatable anytime</span>
         </label>
       </div>
-      <div class="hint" style="margin-top:6px"><span class="de">On demand (Standard): „Prüfen“ öffnet eine 60-Sekunden-Abfrage an alle Studenten; Unentschlossene werden danach „undef“. IN/OUT ist in diesem Modus nur während einer Abfrage möglich. Automatisch: Zu Beginn der Vorlesung entscheiden sich alle Studenten einmal direkt, danach alle X Minuten erneut.</span><span class="en">On demand (default): “Check” opens a 60-second poll for all students; anyone undecided becomes “undefined” afterwards. In this mode IN/OUT is only possible during a poll. Automatic: at the start of the lecture all students decide once right away, then again every X minutes.</span></div>
-    </div>
+      <div class="hint" style="margin-top:6px"><span class="de">Standard: „IN“ beim Beitritt — Änderungen melden die Studenten jederzeit selbst. Automatisch: alle entscheiden sich zum Start und dann alle X Minuten erneut. On demand: „Prüfen“ öffnet eine 60-Sekunden-Abfrage an alle Studenten; IN/OUT ist in diesem Modus nur während einer Abfrage möglich.</span><span class="en">Default: “IN” on joining — students report changes themselves anytime. Automatic: everyone decides at the start and again every X minutes. On demand: “Check” opens a 60-second poll for all students; in this mode IN/OUT is only possible during a poll.</span></div>
+      </details>
+
+      <details class="prosub">
+        <summary>💬 <span class="de">Studenten-Nachrichten</span><span class="en">Student messages</span></summary>
+        <div class="check-row" style="margin-top:8px">
+          <input type="checkbox" id="msgon">
+          <label for="msgon" style="cursor:pointer">
+            <span class="de">Studenten können beim Statuswechsel eine kurze Nachricht schreiben</span>
+            <span class="en">Students can write a short message when changing their status</span>
+          </label>
+        </div>
+        <div class="hint"><span class="de">Standardmäßig aus — die Statuswechsel laufen dann ohne Nachrichteneingabe.</span><span class="en">Off by default — status changes then happen without a message field.</span></div>
+      </details>
+
+      <details class="prosub">
+        <summary>🗳 <span class="de">Umfragen</span><span class="en">Polls</span></summary>
+        <div class="check-row" style="margin-top:8px">
+          <input type="checkbox" id="voteson">
+          <label for="voteson" style="cursor:pointer">
+            <span class="de">Umfragen während der Vorlesung ermöglichen</span>
+            <span class="en">Enable polls during the lecture</span>
+          </label>
+        </div>
+        <div id="vpackwrap" class="hidden">
+          <label for="vpacks" style="display:block;margin-top:8px"><span class="de">Abstimmungspakete (optional)</span><span class="en">Vote packages (optional)</span></label>
+          <textarea id="vpacks" rows="4" style="width:100%;margin-top:8px;background:#101418;color:var(--fg);border:1px solid #2a323c;border-radius:10px;padding:10px;font:inherit;resize:vertical"></textarea>
+          <div class="hint"><span class="de">Format: 1. Zeile = Überschrift, darunter je Zeile eine Option. Leere Zeile = nächstes Paket. Die Pakete erscheinen später im Dropdown vor dem Abstimmen-Knopf.</span><span class="en">Format: line 1 = heading, then one option per line. Empty line = next package. Packages appear later in the dropdown next to the vote button.</span></div>
+        </div>
+        <div class="hint"><span class="de">Standardmäßig aus — der Abstimmen-Knopf bleibt dann ausgeblendet.</span><span class="en">Off by default — the vote button stays hidden then.</span></div>
+      </details>
+
+      <details class="prosub">
+        <summary>📝 <span class="de">Abschluss-Feedback</span><span class="en">Final feedback</span></summary>
+        <div class="check-row" style="margin-top:8px">
+          <input type="checkbox" id="evalon">
+          <label for="evalon" style="cursor:pointer">
+            <span class="de">Nach dem Abschluss Feedback der Studenten einholen</span>
+            <span class="en">Collect student feedback after the event ends</span>
+          </label>
+        </div>
+        <div id="evalqwrap" class="hidden">
+          <label for="evalq" style="display:block;margin-top:8px"><span class="de">Bewertungsfragen</span><span class="en">Evaluation questions</span></label>
+          <textarea id="evalq" rows="4" style="width:100%;margin-top:8px;background:#101418;color:var(--fg);border:1px solid #2a323c;border-radius:10px;padding:10px;font:inherit;resize:vertical"></textarea>
+          <div class="hint"><span class="de">Format: Frage in eine Zeile, darunter die Antwortmöglichkeiten mit | getrennt. Mit |c am Ende gibt es zusätzlich ein Textfeld. Nur „|c“ ohne Optionen = reine Kommentarfrage (z. B. „Was schlägst du sonst noch vor?“). Die Studenten sehen die Fragen erst nach dem Stopp, eine nach der anderen — bis 24 Stunden lang.</span><span class="en">Format: question on one line, answer options below separated by |. Ending with |c adds a free-text field. Just „|c“ without options = comment-only question. Students only see the questions after the lecture stops, one at a time — for up to 24 hours.</span></div>
+        </div>
+        <div class="hint"><span class="de">Standardmäßig aus — die Studenten sehen nach dem Ende dann keine Bewertung.</span><span class="en">Off by default — students then see no evaluation after the end.</span></div>
+      </details>
+    </details>
     <div style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
         <label for="schedStart" style="display:block"><span class="de">Geplanter Beginn (optional)</span><span class="en">Planned start (optional)</span></label>
@@ -1151,6 +1261,7 @@ details.legal a{color:var(--green)}
     <div id="otherlive" class="hidden" style="margin:10px 0 0;padding:8px 12px;border:1px solid #5a4a1a;border-radius:10px;background:#1c1a10;font-size:.9rem"></div>
     <div id="archtime" class="hidden"></div>
     <canvas id="chart"></canvas>
+    <div id="figwrap" class="hidden"></div>
     <div id="bigtime"></div>
     <div class="chat" id="chat"><h3>💬 Messages</h3></div>
     <div class="btn-row">
@@ -1445,6 +1556,15 @@ function loginChanged(){
 document.getElementById('pw').addEventListener('input', loginChanged);
 document.getElementById('mail').addEventListener('input', loginChanged);
 
+/* Pro-Bereich: Optionspakete/Bewertungsfragen erst zeigen, wenn aktiviert */
+function proToggles(){
+  document.getElementById('vpackwrap').classList.toggle('hidden', !document.getElementById('voteson').checked);
+  document.getElementById('evalqwrap').classList.toggle('hidden', !document.getElementById('evalon').checked);
+}
+document.getElementById('voteson').addEventListener('change', proToggles);
+document.getElementById('evalon').addEventListener('change', proToggles);
+proToggles();
+
 /* Dauer / Beginn / Ende: sind zwei gesetzt, wird die dritte automatisch berechnet.
    Nur Dauer gesetzt ist ebenfalls erlaubt (Beginn & Ende bleiben offen). */
 function toTs(v){ return v ? Math.floor(new Date(v).getTime()/1000) : 0; }
@@ -1493,13 +1613,18 @@ async function startSession(){
   const sched_start = toTs(document.getElementById('schedStart').value);
   const sched_end   = toTs(document.getElementById('schedEnd').value);
   const warn_min    = +document.getElementById('warnmin').value;
-  const ask_mode    = (document.querySelector('input[name=askmode]:checked') || {}).value || 'ondemand';
+  const ask_mode    = (document.querySelector('input[name=askmode]:checked') || {}).value || 'start';
+  const lecview     = (document.querySelector('input[name=lecview]:checked') || {}).value || 'pie';
+  const stuview     = (document.querySelector('input[name=stuview]:checked') || {}).value || 'round';
+  const allow_msg   = document.getElementById('msgon').checked;
+  const allow_votes = document.getElementById('voteson').checked;
+  const allow_eval  = document.getElementById('evalon').checked;
   const start_in    = ask_mode === 'start'; /* Server normalisiert je Modus, hier nur mitsenden */
   const vote_packs  = document.getElementById('vpacks').value;
   const evalq       = document.getElementById('evalq').value;
   let r;
   try{
-    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, start_in, warn_min, ask_mode, vote_packs, evalq, pw});
+    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, start_in, warn_min, ask_mode, lecview, stuview, allow_msg, allow_votes, allow_eval, vote_packs, evalq, pw});
   }catch(e){
     return alert(t('srvErr'));
   }
@@ -1814,6 +1939,15 @@ async function reuseSettings(){
   const am = d.ask_mode || (d.warn_min > 0 ? 'auto' : 'start');
   const amEl = document.querySelector('input[name=askmode][value="'+am+'"]');
   if(amEl) amEl.checked = true;
+  /* Pro-Einstellungen übernehmen; Alt-Sessions ohne Felder: heutige Standards */
+  const lv = document.querySelector('input[name=lecview][value="'+(d.lecview || 'chart')+'"]') || document.getElementById('lv-chart');
+  if(lv) lv.checked = true;
+  const sv = document.querySelector('input[name=stuview][value="'+(d.stuview || 'classic')+'"]') || document.getElementById('sv-classic');
+  if(sv) sv.checked = true;
+  document.getElementById('msgon').checked   = !!d.allow_msg;
+  document.getElementById('voteson').checked = !!(d.allow_votes || (d.vote_packs||[]).length);
+  document.getElementById('evalon').checked  = !!(d.allow_eval || (d.eval_qs||[]).length);
+  proToggles();
   document.getElementById('vpacks').value = packsToRaw(d.vote_packs);
   document.getElementById('evalq').value = evalToRaw(d.eval_qs);
   document.getElementById('setup').scrollIntoView({behavior:'smooth'});
@@ -1938,6 +2072,9 @@ function paintRunControls(){
   const bX = document.getElementById('btnLecStop');
   bS.className = 'bigbtn inglow' + (st === 'waiting' ? '' : ' dimmed');
   bX.disabled = (st !== 'running'); /* Beenden nur möglich, während sie läuft */
+  /* Pro-Gating: Abstimmen-Knopf nur anzeigen, wenn Umfragen aktiviert sind */
+  const bV = document.getElementById('btnVote');
+  if(bV) bV.classList.toggle('hidden', !(!archive && session && session.allow_votes));
 }
 
 async function startLecture(){
@@ -2336,8 +2473,137 @@ function processEvents(d){
 }
 function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 
+/* ---------- Pro-Visualisierungen: Tortendiagramm & Strichmännchen ---------- */
+function liveCounts(){
+  const st = session.students || {};
+  let cIn = 0, cOut = 0, cUn = 0, j = 0;
+  for(const k in st){ const s = st[k]; if(!s || s.left) continue; j++;
+    if(s.st === 'in') cIn++; else if(s.st === 'out') cOut++; else cUn++; }
+  return {in:cIn, out:cOut, undef:cUn, joined:j};
+}
+function drawPie(ctx, W, H, cnt){
+  ctx.clearRect(0,0,W,H);
+  const cx = W/2, cy = H/2 - 16, R = Math.max(50, Math.min(W,H)/2 - 70);
+  const parts = [['in', cnt.in, '#2ecc71'], ['undef', cnt.undef, '#f1c40f'], ['out', cnt.out, '#e74c3c']];
+  const tot = cnt.in + cnt.undef + cnt.out;
+  if(!tot){
+    ctx.fillStyle = '#8b98a5'; ctx.font = '16px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(t('chartWait'), cx, cy); return;
+  }
+  let a = -Math.PI/2;
+  for(const [k, v, col] of parts){
+    if(!v) continue;
+    const a2 = a + 2*Math.PI*v/tot, mid = (a+a2)/2;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,R,a,a2); ctx.closePath();
+    ctx.fillStyle = col; ctx.fill();
+    ctx.strokeStyle = '#0c1014'; ctx.lineWidth = 3; ctx.stroke();
+    /* Anzahl je Teil als Beschriftung im Kreisausschnitt */
+    ctx.fillStyle = '#0c1014'; ctx.textAlign = 'center';
+    ctx.font = 'bold ' + Math.min(30, Math.max(16, R/4|0)) + 'px system-ui';
+    ctx.fillText(String(v), cx + Math.cos(mid)*R*0.62, cy + Math.sin(mid)*R*0.62 + 9);
+    a = a2;
+  }
+  /* Legende unter dem Kuchen: Farbfeld + Anzahl je Zustand */
+  ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'left';
+  let x = 14;
+  for(const [txt, col] of [['IN · '+cnt.in,'#2ecc71'], ['undef · '+cnt.undef,'#f1c40f'], ['OUT · '+cnt.out,'#e74c3c']]){
+    ctx.fillStyle = col; ctx.fillRect(x, H-32, 14, 14);
+    ctx.fillStyle = '#e8edf2'; ctx.fillText(txt, x+19, H-20);
+    x += 19 + ctx.measureText(txt).width + 20;
+  }
+}
+/* Ein Strichmännchen: Kopf + Rumpf + Arme + Beine; walk=true = auf dem Weg nach draußen */
+function man(x, y, c, walk){
+  const legs = walk
+    ? 'M'+(x-9)+' '+(y+18)+' l-9 13 M'+(x+9)+' '+(y+18)+' l10 9'
+    : 'M'+(x-8)+' '+(y+18)+' v13 M'+(x+8)+' '+(y+18)+' v13';
+  return '<g stroke="'+c+'" stroke-width="3.4" fill="none" stroke-linecap="round">'+
+    '<circle cx="'+x+'" cy="'+(y-24)+'" r="8.5" fill="'+c+'" stroke="none"/>'+
+    '<path d="M'+x+' '+(y-15)+' v21 M'+(x-11)+' '+(y-7)+' h22 '+legs+'"/></g>';
+}
+function drawFigures(el, cnt){
+  const W = 760, H = 340, gap = 48;
+  const defs = [['undef', cnt.undef, '#f1c40f'], ['in', cnt.in, '#2ecc71'], ['out', cnt.out, '#e74c3c']];
+  const act = defs.filter(z => z[1] > 0);
+  let svg = '';
+  if(!act.length){
+    svg = '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="18" fill="#8b98a5">'+t('chartWait')+'</text>';
+  } else {
+    /* Zielflächen: Breite anteilig nach Gruppenzahl (nur eine Gruppe -> weit ausgedehnt) */
+    const inner = W - 2*gap;
+    const totU = act.reduce((s,z) => s+z[1], 0) || 1;
+    let widths = act.map(z => Math.max(150, inner*z[1]/totU));
+    const wsum = widths.reduce((a,b) => a+b, 0);
+    if(wsum > inner) widths = widths.map(w => w*inner/wsum);
+    let x = gap;
+    const cy = H/2 + 34, ry = 84;
+    act.forEach((z, i) => {
+      const w = widths[i];
+      /* elliptische Sammelfläche */
+      svg += '<ellipse cx="'+(x+w/2)+'" cy="'+cy+'" rx="'+(w/2)+'" ry="'+ry+'" fill="'+z[2]+'" opacity="0.13" stroke="'+z[2]+'" stroke-opacity="0.5" stroke-dasharray="6 5"/>';
+      /* Anzahl groß über der Fläche — nur, wenn es Mitglieder gibt */
+      svg += '<text x="'+(x+w/2)+'" y="'+(cy-ry-16)+'" text-anchor="middle" font-size="42" font-weight="800" fill="'+z[2]+'">'+z[1]+'</text>';
+      /* Strichmännchen in Reihen (max. 36 je Zone); OUT läuft mit Schritt-Pose weg */
+      const perRow = Math.max(3, Math.min(6, Math.ceil(z[1])));
+      const sp = Math.min(42, (w-24)/Math.min(z[1], perRow));
+      for(let n = 0; n < z[1] && n < 36; n++){
+        const r = Math.floor(n/perRow);
+        const inRow = Math.min(z[1]-r*perRow, perRow);
+        const px = x + w/2 + ((n%perRow) - (inRow-1)/2)*sp;
+        const py = cy + 20 - r*54;
+        svg += man(px, py, z[2], z[0] === 'out');
+      }
+      x += w + gap*0.7;
+    });
+  }
+  el.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:760px">'+svg+'</svg>';
+}
+/* Kuchen/Strichmännchen: aktueller Stand statt Zeitverlauf — Timer & Statuszeile bleiben */
+function renderSimple(lv){
+  const c = document.getElementById('chart'), fig = document.getElementById('figwrap');
+  const cnt = liveCounts();
+  const started = !!session.started_at;
+  const statEl = document.getElementById('stat');
+  if(statEl) statEl.textContent = (started ? '' : t('statNot')) +
+    t('statLive')(cnt.joined, cnt.in, cnt.out, cnt.undef);
+  const bt = document.getElementById('bigtime');
+  if(bt){
+    bt.classList.remove('hidden');
+    const anchor = session.sched_start || session.started_at;
+    const now = session.stopped_at || Math.floor(Date.now()/1000);
+    const elapsed = anchor ? Math.max(0, now - anchor) : 0;
+    const planned = session.planned_min*60;
+    const stopped = !!session.stopped_at;
+    const eMin = Math.floor(elapsed/60)*60, remDisp = Math.max(0, planned - eMin);
+    if(elapsed > planned){
+      const om = Math.ceil((elapsed-planned)/60)*60;
+      bt.innerHTML = '<span>'+fmt(eMin)+'</span><span class="bsep">—</span><span class="red blink">+'+fmt(om)+'</span>';
+    } else if(elapsed >= planned*0.9){
+      bt.innerHTML = '<span>'+fmt(eMin)+'</span><span class="bsep">—</span><span class="'+(stopped?'gray':'yellow')+'">'+fmt(remDisp)+'</span>';
+    } else {
+      bt.innerHTML = '<span>'+fmt(eMin)+'</span><span class="bsep">—</span><span class="'+(stopped?'gray':'')+'">'+fmt(remDisp)+'</span>';
+    }
+    bt.classList.remove('arch');
+  }
+  if(lv === 'pie'){
+    fig.classList.add('hidden'); c.classList.remove('hidden');
+    const dpr = window.devicePixelRatio || 1, W = c.clientWidth || 600, H = c.clientHeight || 420;
+    c.width = W*dpr; c.height = H*dpr;
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+    drawPie(ctx, W, H, cnt);
+  } else {
+    c.classList.add('hidden'); fig.classList.remove('hidden');
+    drawFigures(fig, cnt);
+  }
+}
+
 function render(){
   if(!session) return;
+  /* Pro-Visualisierung: Tortendiagramm oder Strichmännchen (live); Archiv bleibt Zeitverlauf */
+  const lv = session.lecview || 'chart';
+  if(!archive && (lv === 'pie' || lv === 'figures')){ renderSimple(lv); return; }
+  const figEl = document.getElementById('figwrap'); if(figEl) figEl.classList.add('hidden');
+  const cvEl = document.getElementById('chart'); if(cvEl) cvEl.classList.remove('hidden');
   const c = document.getElementById('chart');
   const dpr = window.devicePixelRatio || 1;
   const W = c.clientWidth, H = c.clientHeight;
@@ -2544,11 +2810,12 @@ function render(){
   ctx.lineWidth = 1;
 
   // Treppenkurven: grün = IN, rot = OUT, grau = undef — nur der sichtbare Bereich
-  function curve(getVal, color){
+  function curve(getVal, color, fill){
     ctx.strokeStyle = color; ctx.lineWidth = 2.2; ctx.beginPath();
     let pv = getVal(pts[0]);
     for(const p of pts){ if(p.t <= vs) pv = getVal(p); }   // Zustand am linken Rand
-    ctx.moveTo(xOf(Math.max(vs, pts[0].t)), yOf(pv));
+    const x0 = xOf(Math.max(vs, pts[0].t));
+    ctx.moveTo(x0, yOf(pv));
     for(let i=1;i<pts.length;i++){
       const p = pts[i];
       if(p.t <= vs) continue;
@@ -2557,12 +2824,18 @@ function render(){
       ctx.lineTo(xOf(p.t), yOf(getVal(p))); // Sprung
       pv = getVal(p);
     }
-    ctx.lineTo(xOf(Math.min(Math.max(now, vs), vs+vlen)), yOf(pv));
+    const xe = xOf(Math.min(Math.max(now, vs), vs+vlen));
+    ctx.lineTo(xe, yOf(pv));
     ctx.stroke(); ctx.lineWidth = 1;
+    /* transparente Fläche unterhalb der Kurve in ihrer jeweiligen Farbe */
+    if(fill){
+      ctx.lineTo(xe, M.t + ph); ctx.lineTo(x0, M.t + ph); ctx.closePath();
+      ctx.fillStyle = fill; ctx.fill();
+    }
   }
-  curve(p=>p.in, '#2ecc71');
-  curve(p=>p.out, '#e74c3c');
-  curve(p=>p.undef, '#8b98a5');
+  curve(p=>p.in, '#2ecc71', 'rgba(46,204,113,0.12)');
+  curve(p=>p.out, '#e74c3c', 'rgba(231,76,60,0.12)');
+  curve(p=>p.undef, '#8b98a5', 'rgba(139,152,165,0.10)');
 
   // Fanfare beim Eintritt in die letzten 10% der geplanten Zeit (orange Zone)
   if(started && !stopped && archive === false && !fanfared && elapsed >= planned*0.9){
@@ -2699,6 +2972,11 @@ button.state{width:100%;max-width:420px;padding:34px 18px;border-radius:16px;bor
   font-size:1.25rem;font-weight:700;cursor:pointer;color:#fff;transition:all .25s}
 button.in{background:#145c33;box-shadow:0 0 26px 6px var(--green);animation:glowG 2.2s infinite}
 button.out{background:#4a1512;box-shadow:0 0 26px 6px var(--red);animation:glowR 2.2s infinite}
+#btnRound{width:190px;height:190px;border-radius:50%;border:3px solid #2a323c;background:#101418;
+  color:#e8edf2;font:inherit;font-weight:800;font-size:1.05rem;cursor:pointer;transition:all .25s;padding:10px}
+#btnRound.in{border-color:#2ecc71;background:rgba(46,204,113,.16);color:#2ecc71;box-shadow:0 0 26px 6px var(--green)}
+#btnRound.out{border-color:#e74c3c;background:rgba(231,76,60,.16);color:#e74c3c;box-shadow:0 0 26px 6px var(--red)}
+#btnRound:disabled{opacity:.45;cursor:not-allowed}
 button.in.dimmed{background:#183626;box-shadow:0 0 8px 0 rgba(46,204,113,.25);animation:none;opacity:.75}
 button.out.dimmed{background:#3a201e;box-shadow:0 0 8px 0 rgba(231,76,60,.25);animation:none;opacity:.75}
 @keyframes glowG{0%,100%{box-shadow:0 0 18px 4px var(--green)}50%{box-shadow:0 0 34px 10px var(--green)}}
@@ -2799,6 +3077,7 @@ details.legal a{color:#2ecc71}
 <div id="evalexp" class="hidden" style="margin-top:10px;font-size:.85rem;color:#8b98a5"><span class="de">⏳ Die Bewertungsfrist von 24 Stunden ist abgelaufen — eine Bewertung ist nicht mehr möglich.</span><span class="en">⏳ The 24-hour evaluation deadline has passed — the evaluation is no longer available.</span></div>
 <button class="state in dimmed" id="btnIn"><span class="de">✅ Du hast meine Aufmerksamkeit</span><span class="en">✅ You have my attention</span></button>
 <button class="state out dimmed" id="btnOut"><span class="de">😴 Sorry, ich bin abgeschaltet</span><span class="en">😴 Sorry, I disengaged</span></button>
+<button id="btnRound" style="display:none"></button>
 <p class="hint" id="askhint" style="display:none"></p>
 <p class="hint"><span class="de">Dein Status wird anonym übermittelt.</span><span class="en">Your status is transmitted anonymously.</span></p>
 <button id="btnLeave" onclick="leave()"><span class="de">Verlassen &amp; abmelden</span><span class="en">Leave &amp; logout</span></button>
@@ -2956,6 +3235,18 @@ fetch(location.pathname + '?s=' + SID, {
 
 const btnIn = document.getElementById('btnIn');
 const btnOut = document.getElementById('btnOut');
+const btnRound = document.getElementById('btnRound');
+let stuView = 'classic';        // 'round' = runder Knopf (neuer Standard bei Neuanlage), 'classic' = bisherige Ansicht
+let allowMsg = false;           // Studenten-Nachrichten erlaubt?
+function applyStuViewUI(h){
+  if(h === undefined) h = !document.getElementById('finished').classList.contains('hidden');
+  const round = stuView === 'round', show = !h;
+  btnIn.style.display  = (show && !round) ? '' : 'none';
+  btnOut.style.display = (show && !round) ? '' : 'none';
+  btnRound.style.display = (show && round) ? '' : 'none';
+  document.getElementById('msgIn').style.display  = allowMsg ? '' : 'none';
+  document.getElementById('msgOut').style.display = allowMsg ? '' : 'none';
+}
 
 /* Vorlesungs-Status verfolgen: Start/Stopp beim Dozenten */
 let lecState = 'waiting';
@@ -2969,6 +3260,10 @@ function applyLecState(d){
   votePack = +(d.vote_pack || 0);
   evalQs = d.eval_qs || [];
   evalDeadline = d.stopped_at ? ((+d.stopped_at) + EVAL_HOURS*3600) : 0;
+  stuView = d.stuview || 'classic';
+  allowMsg = !!d.allow_msg;
+  applyStuViewUI();
+  paint();
   if(st === lecState) return;
   lecState = st;
   const msg = document.getElementById('stateMsg'), fin = document.getElementById('finished');
@@ -2981,7 +3276,7 @@ function applyLecState(d){
     maybeStartEval();
   }
 }
-function hideMain(h){ btnIn.style.display = h ? 'none' : ''; btnOut.style.display = h ? 'none' : ''; }
+function hideMain(h){ applyStuViewUI(h); }
 let firedBeeps = {};   // gespielte Chirp-Marken je Entscheidungsminute
 let voteOpenShown = false; // Tastatur pro Abstimmungsrunde neu aufbauen
 async function pollState(){
@@ -3237,6 +3532,14 @@ document.getElementById('evalsend').onclick = sendEvalAnswer;
 function paint(){
   btnIn.className  = 'state in'  + (myState==='in'  ? '' : ' dimmed');
   btnOut.className = 'state out' + (myState==='out' ? '' : ' dimmed');
+  if(stuView === 'round'){
+    btnRound.classList.remove('in','out');
+    btnRound.classList.add(myState === 'out' ? 'out' : 'in');
+    btnRound.disabled = pollLocked() || hasLeft;
+    btnRound.innerHTML = myState === 'out'
+      ? '<span class="de">😴 OUT — tippen für IN</span><span class="en">😴 OUT — tap for IN</span>'
+      : '<span class="de">✅ IN — tippen für OUT</span><span class="en">✅ IN — tap for OUT</span>';
+  }
   updateAsk();
 }
 function wireEmoji(containerId){
@@ -3305,6 +3608,13 @@ function closeDlg(){
 function pollLocked(){ return askMode === 'ondemand' && !(decideUntil && decideUntil - nowS() > 0); }
 btnOut.onclick = () => { if(myState==='out'||hasLeft||pollLocked()) return; pendingState='out'; pickedEmojis=[]; openSlide(); document.getElementById('msgOut').value=''; document.getElementById('dlgOut').showModal(); };
 btnIn.onclick  = () => { if(myState==='in'||hasLeft||pollLocked())  return; pendingState='in';  pickedEmojis=[]; openSlide(); document.getElementById('msgIn').value='';  document.getElementById('dlgIn').showModal(); };
+btnRound.onclick = () => {
+  if(hasLeft || pollLocked()) return;
+  const to = myState === 'out' ? 'in' : 'out';
+  document.getElementById(to === 'out' ? 'msgOut' : 'msgIn').value = '';
+  pickedEmojis = []; slideK = 0;
+  send(to);
+};
 
 async function leave(){
   if(!confirm(sT('leaveConfirm'))) return;
