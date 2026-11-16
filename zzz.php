@@ -88,7 +88,9 @@ function save_sess(string $s, array $d): void {
 }
 function new_sid(): string {
     $c = 'abcdefghjkmnpqrstuvwxyz23456789';
-    $s = ''; for ($i=0;$i<6;$i++) $s .= $c[random_int(0, strlen($c)-1)];
+    do {
+        $s = ''; for ($i=0;$i<6;$i++) $s .= $c[random_int(0, strlen($c)-1)];
+    } while (is_file(spath($s))); // niemals eine bestehende Session versehentlich überschreiben
     return $s;
 }
 
@@ -244,6 +246,23 @@ function advance_state(string $s): void {
         $now = time();
         if (!empty($d['stopped_at'])) return ['save' => false];
         $save = false;
+        /* Parallel-Betrieb: Ein Student gilt nur so lange als anwesend, wie sein
+           Tab wirklich offen ist (Heartbeat via Snapshot-Poll, s. u.).
+           Stillt ein Tab länger als 5 Minuten ein, wird der Student automatisch
+           abgemeldet — er zählt dann in keiner parallelen Live-Vorlesung mehr mit.
+           Kommt der Tab zurück (oder klickt der Student), wird er nahtlos wieder
+           angemeldet. Parallele Sessions eines Dozenten bleiben so streng getrennt. */
+        $STALE = 300;
+        foreach (($d['students'] ?? []) as $tok => $st) {
+            if (!empty($st['left'])) continue;
+            $seen = (int)($st['seen'] ?? 0);
+            if ($seen > 0 && $now - $seen > $STALE) {
+                $d['students'][$tok]['left'] = $now;
+                $d['students'][$tok]['left_by'] = 'timeout';
+                $d['events'][] = ['t'=>$now, 's'=>$tok, 'kind'=>'leave', 'msg'=>'', 'emoji'=>'', 'val'=>0];
+                $save = true;
+            }
+        }
         /* automatische Neuentscheidung alle warn_min Minuten — nur im Modus 'auto' */
         $anchor = (int)($d['sched_start'] ?? 0) ?: (int)($d['started_at'] ?? 0);
         $warnMin = (int)($d['warn_min'] ?? 0);
@@ -428,9 +447,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             if (!isset($d['students'][$token]))
                 $d['students'][$token] = ['joined' => time(), 'st' => $state, 'seq' => (int)($d['decide_seq'] ?? 0)];
             else {
+                /* Timeout-abgemeldet und trotzdem aktiv? -> nahtlos wieder anmelden */
+                if (!empty($d['students'][$token]['left'])) {
+                    $d['students'][$token]['left'] = 0;
+                    $d['students'][$token]['left_by'] = '';
+                    $d['events'][] = ['t' => time(), 's' => $token, 'kind' => 'join', 'msg' => '', 'emoji' => '', 'val' => 0];
+                }
                 $d['students'][$token]['st'] = $state;
                 $d['students'][$token]['seq'] = (int)($d['decide_seq'] ?? 0); // Neuentscheidung erfüllt
             }
+            $d['students'][$token]['seen'] = time();
             $d['events'][] = ['t' => time(), 's' => $token, 'kind' => $state, 'msg' => $msg,
                 'emoji' => $emoji, 'val' => 0, 'slide' => $slide];
             return ['save' => true, 'body' => ['ok'=>true, 'slide' => $slide]];
@@ -444,10 +470,22 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         if (!preg_match('/^[A-Za-z0-9\-]{8,40}$/', $token)) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'bad token']); exit; }
         reply(sess_mutate($s, function (array &$d) use ($token) {
             if (!empty($d['stopped_at'])) return ['code' => 410, 'body' => ['ok'=>false,'error'=>'finished']];
-            if (isset($d['students'][$token])) return ['body' => ['ok'=>true,'joined'=>false]];
+            if (isset($d['students'][$token])) {
+                /* Timeout-abgemeldeter Tab öffnet die Seite wieder -> zurück dazu */
+                if (!empty($d['students'][$token]['left'])) {
+                    $d['students'][$token]['left'] = 0;
+                    $d['students'][$token]['left_by'] = '';
+                    $d['students'][$token]['st'] = join_state_of($d); // wie beim normalen Beitritt
+                    $d['students'][$token]['seen'] = time();
+                    $d['events'][] = ['t' => time(), 's' => $token, 'kind' => 'join', 'msg' => '', 'emoji' => '', 'val' => 0];
+                    return ['save' => true, 'body' => ['ok'=>true,'joined'=>true]];
+                }
+                $d['students'][$token]['seen'] = time();
+                return ['body' => ['ok'=>true,'joined'=>false]];
+            }
             $d['students'][$token] = ['joined' => time(),
                 'st' => join_state_of($d),   // Startzustand je Modus
-                'seq' => 0, 'vote' => null];
+                'seq' => 0, 'vote' => null, 'seen' => time()];
             $d['events'][] = ['t' => time(), 's' => $token, 'kind' => 'join', 'msg' => '', 'emoji' => '', 'val' => 0];
             return ['save' => true, 'body' => ['ok'=>true,'joined'=>true]];
         }));
@@ -743,6 +781,32 @@ if (sid_ok($s)) {
     if ($api === 'snapshot') {
         header('Content-Type: application/json; charset=utf-8');
         advance_state($s);
+        /* Heartbeat: der offene Studenten-Tab meldet sich mit seinem Token.
+           Zähler-stand wird max. 1x/Minute gespeichert (anonym, nur zum
+           Erkennen geschlossener Tabs). Ein per Timeout abgemeldeter Student
+           wird hier automatisch wieder angemeldet (gleicher Zustand wie zuvor). */
+        $tok = (string)($_GET['tok'] ?? '');
+        if (preg_match('/^[A-Za-z0-9\-]{8,40}$/', $tok)) {
+            $res = sess_mutate($s, function (array &$d) use ($tok) {
+                $st = $d['students'][$tok] ?? null;
+                if (!is_array($st) || !empty($d['stopped_at'])) return ['save' => false];
+                $save = false;
+                if (!empty($st['left']) && ($st['left_by'] ?? '') === 'timeout') {
+                    $d['students'][$tok]['left'] = 0;
+                    $d['students'][$tok]['left_by'] = '';
+                    $d['students'][$tok]['st'] = join_state_of($d); // wie beim normalen Beitritt
+                    $d['students'][$tok]['seq'] = (int)($d['decide_seq'] ?? 0);
+                    $d['events'][] = ['t'=>time(), 's'=>$tok, 'kind'=>'join', 'msg'=>'', 'emoji'=>'', 'val'=>0];
+                    $save = true;
+                }
+                if (time() - (int)($st['seen'] ?? 0) > 60) {
+                    $d['students'][$tok]['seen'] = time();
+                    $save = true;
+                }
+                return ['save' => $save];
+            });
+            if (!empty($res['save'])) { /* nichts: $d wird unten frisch geladen */ }
+        }
         $d = load_sess($s);
         if (is_array($d)) { unset($d['export_key'], $d['owner']); $d['now'] = time(); } // Interna nie herausrücken
         echo json_encode($d ?? ['ok'=>false]); exit;
@@ -2092,8 +2156,9 @@ async function refreshOtherLive(excludeId){
   if(!r.ok){ box.classList.add('hidden'); return; }
   const others = (r.sessions || []).filter(x => x.status === 'live' && x.id !== excludeId);
   if(!others.length){ box.classList.add('hidden'); return; }
+  /* jede parallele Live-Vorlesung mit eigenem Zähler — strikt getrennte Sessions */
   box.innerHTML = '<b>'+t('otherLive')+'</b> '+
-    others.map(x => '<button onclick="openArchive(\''+x.id+'\')">▶ '+escapeHtml(x.title || x.id)+'</button>').join(' ');
+    others.map(x => '<button onclick="openArchive(\''+x.id+'\')">▶ '+escapeHtml(x.title || x.id)+' <span style="color:var(--green)">👥 '+x.students+'</span></button>').join(' ');
   box.classList.remove('hidden');
 }
 
@@ -3356,7 +3421,7 @@ let firedBeeps = {};   // gespielte Chirp-Marken je Entscheidungsminute
 let voteOpenShown = false; // Tastatur pro Abstimmungsrunde neu aufbauen
 async function pollState(){
   try{
-    const d = await fetch(location.pathname + '?api=snapshot&s=' + SID).then(r=>r.json());
+    const d = await fetch(location.pathname + '?api=snapshot&s=' + SID + '&tok=' + encodeURIComponent(token)).then(r=>r.json());
     if(!d || !d.id){ return; }
     serverOff = (d.now || Math.floor(Date.now()/1000)) - Math.floor(Date.now()/1000);
     curSlide = consensusSlide(d);   // Mehrheitsfolie für das Drehrad
