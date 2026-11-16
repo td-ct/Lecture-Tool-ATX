@@ -118,7 +118,10 @@ function ucut(string $s, int $max): string {
 function autostop(string $s): void {
     sess_mutate($s, function (array &$d) {
         if (empty($d['started_at']) || !empty($d['stopped_at'])) return ['save' => false];
-        $limit = (int)$d['started_at'] + (int)($d['planned_min'] ?? 0) * 60 + 21600;
+        $planned = (int)($d['planned_min'] ?? 0);
+        /* mit geplanter Dauer: spätestens 6 h nach Ablauf Schluss;
+           ohne Dauer: läuft frei, Autostopp erst nach 24 Stunden */
+        $limit = (int)$d['started_at'] + ($planned > 0 ? $planned * 60 + 21600 : 86400);
         if (time() > $limit) { $d['stopped_at'] = $limit; $d['stop_by'] = 'auto'; return ['save' => true]; }
         return ['save' => false];
     });
@@ -289,7 +292,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     if ($action === 'create') {
         $pw = (string)($in['pw'] ?? '');
         if (strlen($pw) < 4) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>emsg('Bitte ein Dozenten-Passwort (mind. 4 Zeichen) wählen','Please choose a lecturer password (min. 4 characters)')]); exit; }
-        $min = max(5, min(720, (int)($in['planned_min'] ?? 90)));
+        $min = (int)($in['planned_min'] ?? 90);
+        $min = $min > 0 ? max(5, min(720, $min)) : 0; // 0 = ohne geplante Dauer: keine Zeitvorgabe, läuft frei
         $title = ucut((string)($in['title'] ?? ''), 120);
         $lect  = ucut((string)($in['lecturer'] ?? ''), 80);
         $mail  = ucut((string)($in['email'] ?? ''), 100);
@@ -310,6 +314,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $allow_msg   = !empty($in['allow_msg']);
         $allow_votes = !empty($in['allow_votes']);
         $allow_eval  = !empty($in['allow_eval']);
+        $allow_check = !empty($in['allow_check']) || $ask_mode === 'ondemand'; // On-demand braucht „Prüfen“ zwingend
         if ($sched_start < 0 || $sched_end < 0 || ($sched_start && $sched_end && $sched_end <= $sched_start)) {
             http_response_code(400); echo json_encode(['ok'=>false,'error'=>emsg('Ungültige geplante Zeiten','Invalid scheduled times')]); exit;
         }
@@ -335,6 +340,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             'allow_msg' => $allow_msg,
             'allow_votes' => $allow_votes,
             'allow_eval' => $allow_eval,
+            'allow_check' => $allow_check,
             'decide_seq' => 0,
             'decide_until' => 0,
             'vote_no' => 0,
@@ -348,7 +354,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         ];
         if ($autostart) {
             $d0['started_at'] = time();
-            $d0['expected_end'] = time() + $min * 60;
+            if ($min > 0) $d0['expected_end'] = time() + $min * 60; // ohne Dauer: kein erwartetes Ende
             /* wie beim manuellen Start: Modus 'auto' fragt direkt zu Beginn ab */
             if (ask_mode_of($d0) === 'auto')
                 open_decide($d0, 'auto', time());
@@ -371,8 +377,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             if (!empty($d['stopped_at'])) return ['code' => 409, 'body' => ['ok'=>false,'error'=>emsg('Vorlesung ist bereits beendet','Lecture is already finished')]];
             if (empty($d['started_at'])) {
                 $d['started_at'] = time();
-                /* erwartetes Ende fest mitprotokollieren */
-                $d['expected_end'] = time() + (int)($d['planned_min']) * 60;
+                /* erwartetes Ende fest mitprotokollieren (nur mit geplanter Dauer) */
+                if ((int)($d['planned_min'] ?? 0) > 0)
+                    $d['expected_end'] = time() + (int)($d['planned_min']) * 60;
                 /* Modus 'auto': direkt zu Beginn einmal abfragen (60 s),
                    danach läuft das eingestellte Intervall bis zur nächsten Abfrage */
                 if (ask_mode_of($d) === 'auto')
@@ -466,6 +473,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         reply(sess_mutate($s, function (array &$d) use ($s, $pw) {
             if (!owner_ok($d, $s, $pw)) return ['code' => 403, 'body' => ['ok'=>false,'error'=>emsg('falsches Passwort','wrong password')]];
             if (!empty($d['stopped_at'])) return ['code' => 409, 'body' => ['ok'=>false,'error'=>emsg('Vorlesung ist bereits beendet','Lecture is already finished')]];
+            if (isset($d['allow_check']) && empty($d['allow_check'])) return ['code' => 403, 'body' => ['ok'=>false,'error'=>emsg('„Prüfen“ ist für diese Veranstaltung deaktiviert','“Check” is disabled for this event')]];
             open_decide($d, 'lecturer', time());
             return ['save' => true, 'body' => ['ok'=>true]];
         }));
@@ -652,6 +660,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 'allow_msg' => !empty($d['allow_msg']),
                 'allow_votes' => !empty($d['allow_votes']),
                 'allow_eval' => !empty($d['allow_eval']),
+                /* Alt-Sessions ohne Feld: „Prüfen“ war immer möglich */
+                'allow_check' => !array_key_exists('allow_check', $d) ? true : !empty($d['allow_check']),
                 'planned_min' => (int)($d['planned_min'] ?? 0),
                 'started_at' => $d['started_at'] ?? null,
                 'stopped_at' => $d['stopped_at'] ?? null,
@@ -1147,6 +1157,14 @@ details.legal a{color:var(--green)}
 
       <details class="prosub">
         <summary>🧭 <span class="de">Status-Abfrage der Studenten</span><span class="en">Student status polling</span></summary>
+        <div class="check-row" style="margin-top:8px">
+          <input type="checkbox" id="checkon">
+          <label for="checkon" style="cursor:pointer">
+            <span class="de">🔍 „Prüfen“ ermöglichen — zeigt in der Dozenten-Ansicht den Knopf für eine gezielte 60-Sekunden-Abfrage an alle</span>
+            <span class="en">🔍 Enable “Check” — shows the lecturer-view button for a targeted 60-second poll of everyone</span>
+          </label>
+        </div>
+        <div class="hint" style="margin-top:4px"><span class="de">Standardmäßig aus — im On-demand-Modus wird „Prüfen“ automatisch mit aktiviert, da er dort notwendig ist.</span><span class="en">Off by default — in on-demand mode “Check” is enabled automatically, as it is required there.</span></div>
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
         <input type="radio" name="askmode" value="start" id="am-start" checked>
         <label for="am-start" style="cursor:pointer">
@@ -1167,7 +1185,7 @@ details.legal a{color:var(--green)}
         <span class="de">Minuten</span><span class="en">minutes</span>
       </div>
       <div style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
-        <input type="radio" name="askmode" value="ondemand" id="am-ondemand">
+        <input type="radio" name="askmode" value="ondemand" id="am-ondemand" onchange="document.getElementById('checkon').checked = true">
         <label for="am-ondemand" style="cursor:pointer">
           <span class="de">On demand: Alle Studenten bleiben „undef“, bis du in der Vorlesung über „Prüfen“ gezielt abfragst — beliebig oft wiederholbar</span>
           <span class="en">On demand: all students stay “undefined” until you ask via “Check” during the lecture — repeatable anytime</span>
@@ -1634,7 +1652,7 @@ async function startSession(){
   if(!email) return alert(t('mailShort'));
   if(document.getElementById('pwsave').checked) localStorage.setItem(LSPW, pw);
   const planon = document.getElementById('planon').checked;
-  const planned = +document.getElementById('dur').value;
+  const planned = planon ? +document.getElementById('dur').value : 0; /* ohne Planung: keine Dauer, Zeit läuft frei */
   const title = document.getElementById('title').value.trim();
   const lecturer = document.getElementById('lect').value.trim();
   const institute = document.getElementById('inst').value.trim();
@@ -1648,12 +1666,13 @@ async function startSession(){
   const allow_msg   = document.getElementById('msgon').checked;
   const allow_votes = document.getElementById('voteson').checked;
   const allow_eval  = document.getElementById('evalon').checked;
+  const allow_check = document.getElementById('checkon').checked || ask_mode === 'ondemand';
   const start_in    = ask_mode === 'start'; /* Server normalisiert je Modus, hier nur mitsenden */
   const vote_packs  = document.getElementById('vpacks').value;
   const evalq       = document.getElementById('evalq').value;
   let r;
   try{
-    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, autostart, start_in, warn_min, ask_mode, lecview, stuview, allow_msg, allow_votes, allow_eval, vote_packs, evalq, pw});
+    r = await api({action:'create', planned_min: planned, title, lecturer, email, institute, sched_start, sched_end, autostart, start_in, warn_min, ask_mode, lecview, stuview, allow_msg, allow_votes, allow_eval, allow_check, vote_packs, evalq, pw});
   }catch(e){
     return alert(t('srvErr'));
   }
@@ -1981,6 +2000,8 @@ async function reuseSettings(){
   document.getElementById('msgon').checked   = !!d.allow_msg;
   document.getElementById('voteson').checked = !!(d.allow_votes || (d.vote_packs||[]).length);
   document.getElementById('evalon').checked  = !!(d.allow_eval || (d.eval_qs||[]).length);
+  /* „Prüfen ermöglichen“: Alt-Sessions ohne Feld = bisheriges Verhalten (an) */
+  document.getElementById('checkon').checked = d.allow_check !== false && (d.allow_check === true || am === 'ondemand' || !('allow_check' in d));
   proToggles();
   document.getElementById('vpacks').value = packsToRaw(d.vote_packs);
   document.getElementById('evalq').value = evalToRaw(d.eval_qs);
@@ -2109,6 +2130,9 @@ function paintRunControls(){
   /* „Timer starten“ nur zeigen, solange noch nicht gestartet wurde
      (Autostart-Sessions starten sofort — der Knopf bleibt dann komplett weg) */
   bS.classList.toggle('hidden', st !== 'waiting');
+  /* Pro-Gating: „Prüfen“-Knopf nur bei aktivierter Status-Abfrage (Alt-Sessions: an) */
+  const bT = document.getElementById('btnTest');
+  if(bT) bT.classList.toggle('hidden', !(!archive && session && session.allow_check !== false));
   /* Pro-Gating: Abstimmen-Knopf nur anzeigen, wenn Umfragen aktiviert sind */
   const bV = document.getElementById('btnVote');
   if(bV) bV.classList.toggle('hidden', !(!archive && session && session.allow_votes));
@@ -2605,12 +2629,16 @@ function renderSimple(lv){
     t('statLive')(cnt.joined, cnt.in, cnt.out, cnt.undef);
   const bt = document.getElementById('bigtime');
   if(bt){
-    bt.classList.remove('hidden');
     const anchor = session.sched_start || session.started_at;
     const now = session.stopped_at || Math.floor(Date.now()/1000);
     const elapsed = anchor ? Math.max(0, now - anchor) : 0;
-    const planned = session.planned_min*60;
+    const planned = (session.planned_min || 0)*60;
     const stopped = !!session.stopped_at;
+    if(planned <= 0){
+      /* ohne geplante Dauer läuft keine Zeit — große Anzeige bleibt weg */
+      bt.classList.add('hidden');
+    } else {
+    bt.classList.remove('hidden');
     const eMin = Math.floor(elapsed/60)*60, remDisp = Math.max(0, planned - eMin);
     if(elapsed > planned){
       const om = Math.ceil((elapsed-planned)/60)*60;
@@ -2621,6 +2649,7 @@ function renderSimple(lv){
       bt.innerHTML = '<span>'+fmt(eMin)+'</span><span class="bsep">—</span><span class="'+(stopped?'gray':'')+'">'+fmt(remDisp)+'</span>';
     }
     bt.classList.remove('arch');
+    }
   }
   if(lv === 'pie'){
     fig.classList.add('hidden'); c.classList.remove('hidden');
@@ -2636,9 +2665,10 @@ function renderSimple(lv){
 
 function render(){
   if(!session) return;
-  /* Nachrichten-Fenster nur zeigen, wenn Nachrichten aktiviert sind */
+  /* Nachrichten-Fenster (inkl. Überschrift) nur zeigen, wenn Nachrichten aktiviert sind;
+     Alt-Sessions ohne Feld: Messages bleiben wie bisher sichtbar */
   const chatEl = document.getElementById('chat');
-  if(chatEl) chatEl.classList.toggle('hidden', !(session && session.allow_msg));
+  if(chatEl) chatEl.classList.toggle('hidden', !session || session.allow_msg === false);
   /* Pro-Visualisierung: Tortendiagramm oder Strichmännchen (live); Archiv bleibt Zeitverlauf */
   const lv = session.lecview || 'chart';
   if(!archive && (lv === 'pie' || lv === 'figures')){ renderSimple(lv); return; }
@@ -2955,6 +2985,10 @@ function render(){
       }
     } else {
       if(at) at.classList.add('hidden');
+      if(planned <= 0){
+        /* ohne geplante Dauer läuft keine Zeit — große Anzeige bleibt weg */
+        bt.classList.add('hidden');
+      } else {
       bt.classList.remove('hidden');
     const eMin = Math.floor(elapsed/60)*60;            // abgelaufene, volle Minuten
     const remDisp = Math.max(0, planned - eMin);       // passt als Komplement dazu
@@ -2972,6 +3006,7 @@ function render(){
         + '<span class="'+(stopped?'gray':'')+'">'+fmt(remDisp)+'</span>';
     }
     bt.classList.remove('arch');
+    }
     }
   }
 
