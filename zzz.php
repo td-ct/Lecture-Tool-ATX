@@ -2634,8 +2634,8 @@ function liveCounts(){
     if(s.st === 'in') cIn++; else if(s.st === 'out') cOut++; else cUn++; }
   return {in:cIn, out:cOut, undef:cUn, joined:j};
 }
-function drawPie(ctx, W, H, cnt){
-  ctx.clearRect(0,0,W,H);
+function drawPie(ctx, W, H, cnt, whiteBg){
+  if(!whiteBg) ctx.clearRect(0,0,W,H); /* whiteBg: nichts löschen — zeichnet auf vorhandenen weißen Grund */
   const cx = W/2, cy = H/2 - 16, R = Math.max(50, Math.min(W,H)/2 - 70);
   const parts = [['in', cnt.in, '#2ecc71'], ['undef', cnt.undef, '#f1c40f'], ['out', cnt.out, '#e74c3c']];
   const tot = cnt.in + cnt.undef + cnt.out;
@@ -2661,7 +2661,7 @@ function drawPie(ctx, W, H, cnt){
   let x = 14;
   for(const [txt, col] of [['IN · '+cnt.in,'#2ecc71'], ['undef · '+cnt.undef,'#f1c40f'], ['OUT · '+cnt.out,'#e74c3c']]){
     ctx.fillStyle = col; ctx.fillRect(x, H-32, 14, 14);
-    ctx.fillStyle = '#e8edf2'; ctx.fillText(txt, x+19, H-20);
+    ctx.fillStyle = whiteBg ? '#3a424c' : '#e8edf2'; ctx.fillText(txt, x+19, H-20);
     x += 19 + ctx.measureText(txt).width + 20;
   }
 }
@@ -2823,10 +2823,16 @@ function drawQrViz(ctx, W, H, cnt, lv){
   const ox = Math.floor((W - qrSide)/2), oy = Math.floor((H - 46 - qrSide)/2);
   const joined = cnt.in + cnt.undef + cnt.out;
   if(lv === 'qrp'){
-    drawPie(ctx, W, H, cnt);                         /* Hintergrund: die Torte */
-    ctx.fillStyle = '#101418';                       /* QR-Pixel darauf, Helle bleiben Tortenfarbe */
-    for(let r = 0; r < m.n; r++) for(let cc = 0; cc < m.n; cc++)
-      if(m.cells[r][cc]) ctx.fillRect(ox+(cc+quiet)*mod, oy+(r+quiet)*mod, mod, mod);
+    /* alles vor weißem Grund: weiße Fläche, Torte darauf, QR deckend obendrauf */
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    drawPie(ctx, W, H, cnt, true);                    /* Hintergrund: die Torte (ohne Löschen) */
+    ctx.fillStyle = '#ffffff';                        /* QR deckend: weiße Platte inkl. Rand */
+    ctx.fillRect(ox, oy, qrSide, qrSide);
+    for(let r = 0; r < m.n; r++) for(let cc = 0; cc < m.n; cc++){
+      ctx.fillStyle = m.cells[r][cc] ? '#101418' : '#ffffff';
+      ctx.fillRect(ox+(cc+quiet)*mod, oy+(r+quiet)*mod, mod, mod);
+    }
   } else {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(ox, oy, qrSide, qrSide);
@@ -2846,12 +2852,12 @@ function drawQrViz(ctx, W, H, cnt, lv){
       });
     }
   }
-  /* Legende wie bei der Torte + Modus-Beschriftung */
+  /* Legende wie bei der Torte + Modus-Beschriftung (bei qrp liegt alles auf weiß) */
   ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'left';
   let x = 14;
   for(const [txt, col] of [['IN · '+cnt.in,'#2ecc71'], ['undef · '+cnt.undef,'#f1c40f'], ['OUT · '+cnt.out,'#e74c3c']]){
     ctx.fillStyle = col; ctx.fillRect(x, H-32, 14, 14);
-    ctx.fillStyle = '#e8edf2'; ctx.fillText(txt, x+19, H-20);
+    ctx.fillStyle = lv === 'qrp' ? '#3a424c' : '#e8edf2'; ctx.fillText(txt, x+19, H-20);
     x += 19 + ctx.measureText(txt).width + 20;
   }
   ctx.fillStyle = '#8b98a5'; ctx.font = '12px system-ui';
